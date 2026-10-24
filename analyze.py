@@ -123,9 +123,15 @@ def layer_sweep(d, kinds, out_dir):
     plt.savefig(os.path.join(out_dir, "layer_sweep.png"), dpi=160)
     plt.close()
 
-    # choose the layer with the best validation accuracy for logistic regression
-    best = sweep[sweep.probe == kinds[0]].sort_values("val_acc", ascending=False).iloc[0]
+    # Choose the layer with the best validation accuracy for logistic regression.
+    # Several layers can tie; a stable sort makes the choice deterministic (the EARLIEST tied layer).
+    # (The default pandas sort is not stable, so without kind="stable" different machines can pick different layers.)
+    lr = sweep[sweep.probe == kinds[0]]
+    tied = lr[lr.val_acc == lr.val_acc.max()].layer.tolist()
+    best = lr.sort_values("val_acc", ascending=False, kind="stable").iloc[0]
     best_layer = int(best.layer)
+    if len(tied) > 1:
+        print(f"note: layers {tied} tie on validation accuracy ({lr.val_acc.max():.3f}); using the earliest, {best_layer}")
 
     X = X_all[:, best_layer, :]
     test_results = {}

@@ -3,12 +3,13 @@
 *Mouhammed Soumaille · October 2026*
 
 **TL;DR.** I trained linear probes on the hidden states of Qwen2.5-0.5B and Qwen2.5-1.5B to read off whether a
-statement is true. The probes are near-perfect on held-out data from the dataset they were trained on, and
-partly transfer to other datasets. But a probe trained on affirmative statements is **reliably wrong on negated
-ones** — it scores well *below* chance — at both model sizes. The inversion is weaker at 1.5B than at 0.5B but
-does not go away. And at 1.5B, how badly the probe fails on negated statements depends strongly on which layer
-it reads from, even across layers where in-distribution accuracy is flat at ~99% — and the layer you would
-pick by in-distribution accuracy is the one where it fails worst.
+statement is true. The probes are near-perfect on held-out examples from the dataset they were trained on. But a
+probe trained on affirmative statements ("X is in Y") is usually **confidently wrong on the negated versions**
+("X is not in Y") — it scores far *below* chance. A direct test shows why: the probe gives a statement and its
+negated twin the same answer up to 96–100% of the time, i.e. it reads the city–country pair and ignores the "not".
+How badly it fails depends heavily on **which layer** it reads from — at 1.5B, four layers are indistinguishable
+on validation accuracy (0.997) yet give 0.05 to 0.53 accuracy on negated cities. Training on both affirmative and
+negated statements fixes much of the problem at 1.5B but not at 0.5B.
 
 This is a replication-and-extension of *The Geometry of Truth* (Marks & Tegmark, 2023), using their datasets.
 
@@ -25,15 +26,19 @@ other kinds of statements, and on negated statements?**
 - **Data:** true/false statement datasets from *The Geometry of Truth*: city locations (`cities`), negated city
   locations (`neg_cities`), Spanish–English translations (`sp_en_trans`), negated translations
   (`neg_sp_en_trans`), number comparisons (`larger_than`, `smaller_than`), and company facts
-  (`companies_true_false`). Each dataset is balanced (50% true). The negated datasets reuse the same
-  entity–attribute pairs as their affirmative counterparts, with "not" inserted and the label flipped.
+  (`companies_true_false`). Every dataset is balanced (50% true), so chance accuracy is 0.50. I checked that each
+  "flipped" dataset is its partner **row for row**, with "not" inserted (or "larger" swapped for "smaller") and
+  every label flipped.
 - **Features:** the hidden state of the last token of each statement, at every layer.
 - **Probes:** logistic regression on standardized features (C = 0.1), and a difference-of-means ("mass-mean")
   probe that needs no fitting beyond two averages.
 - **Protocol:** 60/20/20 stratified train/validation/test split. The layer is chosen by validation accuracy on
-  `cities`; in-distribution accuracy is reported on the held-out test split, and cross-dataset accuracy on the
-  whole target dataset. Brackets are 95% bootstrap confidence intervals. Both models go through the same code
-  with the same seed, so their splits are identical.
+  `cities`, taking the **earliest** layer when several tie. In-distribution accuracy is reported on the held-out
+  test split, cross-dataset accuracy on the whole target dataset; brackets are 95% bootstrap intervals.
+- **Robustness:** because those intervals only capture test-set noise, every key number is also reported as a
+  range over **all layers that tie for best validation accuracy × 5 random splits** (`robustness.py`).
+- **Verification:** all numbers were re-derived with an independent logistic-regression implementation on the same
+  splits (agreement within 0.02 accuracy).
 
 ## Results
 
@@ -41,110 +46,120 @@ other kinds of statements, and on negated statements?**
 
 | | 0.5B | 1.5B |
 |---|---|---|
-| Layers near chance / weak | 0–6 (0.50–0.70) | 0–5 (0.50–0.73) |
+| Weak layers | 0–6 (0.50–0.70) | 0–5 (0.50–0.73) |
 | Sharp rise | layer 8 (0.93) | layer 6 (0.88) |
-| Best layer (validation, `cities`) | 10 of 24 (0.963) | 11 of 28 (0.997) |
-| Held-out test accuracy at that layer | 0.957 [0.933, 0.980] | 1.000 [1.000, 1.000] |
+| Best validation accuracy | 0.963, tied at layers 10, 11 | 0.997, tied at layers 11, 12, 15, 19 |
+| Layer used (earliest tie) | 10 | 11 |
+| Held-out test accuracy at that layer | 0.957 [0.933, 0.980] | 0.997 [0.990, 1.000] |
 | After the peak | flat, 0.94–0.96 | flat, 0.98–1.00 |
 
 ![Layer sweep, 1.5B](results/layer_sweep.png)
 
-The best layer sits at roughly 40% of the network's depth in both models, and accuracy stays high all the way
-to the final layer.
+### 2. Negation inverts the probe — because the probe ignores the "not"
 
-### 2. Affirmative facts partly share a direction — but transfer is not uniformly better at scale
+| Train → test (logistic regression) | 0.5B, layer 10 | 1.5B, layer 11 | 0.5B range* | 1.5B range* |
+|---|---|---|---|---|
+| `cities` → `neg_cities` | **0.044** [0.034, 0.054] | **0.019** [0.013, 0.027] | 0.04–0.38 | 0.01–0.57 |
+| `sp_en_trans` → `neg_sp_en_trans` | **0.054** [0.031, 0.076] | **0.006** [0.000, 0.014] | 0.02–0.44 | 0.00–0.51 |
+| `larger_than` → `smaller_than` | **0.055** [0.045, 0.065] | **0.000** [0.000, 0.000] | 0.02–0.14 | 0.00–0.27 |
 
-| Train → test (logistic regression) | 0.5B | 1.5B |
-|---|---|---|
-| `cities` → `sp_en_trans` | 0.675 [0.627, 0.720] | **0.946** [0.921, 0.969] |
-| `companies` → `cities` | 0.808 [0.787, 0.828] | **0.955** [0.944, 0.965] |
-| `sp_en_trans` → `cities` | **0.793** [0.772, 0.815] | 0.624 [0.599, 0.648] |
-| `companies` → `sp_en_trans` | 0.520 [0.472, 0.571] | 0.636 [0.585, 0.684] |
+\* over all tied best layers × 5 random splits.
 
-Some transfers get much stronger at 1.5B and one gets weaker, so "bigger model, more general probe" is too
-simple a summary. Each probe recovers its own dataset well (0.81–0.97 at 0.5B, 0.95–1.00 at 1.5B).
+At the selected layers these probes are *confidently wrong*: they predict the opposite label almost every time.
+At 0.5B every tied layer is below chance. At 1.5B, layers 11, 12 and 15 are below chance, but layer 19 — equally
+good on validation — is at chance for cities and translations (see Section 3). Number comparisons stay below chance
+at every tied layer in both models.
 
-![Generalization matrix, 1.5B](results/generalization_logreg.png)
+**Why.** The flipped datasets reuse the same city–country pairs, word pairs, or number pairs with the label flipped.
+If the probe reads "is this pair correct?" and ignores the negation, it will give a statement and its negated twin
+the same answer, and so score near zero on the flipped set. I tested this directly: on held-out pairs, the 1.5B
+layer-11 probe gives the twin **the same prediction 96%** (cities), **98%** (translations) and **100%** (numbers)
+of the time; the 0.5B layer-10 probe 93%, 83% and 92%. Where the inversion disappears (1.5B, layer 19), agreement on
+cities and translations drops to about 50%. This replicates and explains the negation failure reported by Marks &
+Tegmark.
 
-### 3. Negation inverts the probe
+### 3. Which layer you read from matters — even when validation can't tell layers apart
 
-| Train → test (logistic regression) | 0.5B | 1.5B |
-|---|---|---|
-| `cities` → `neg_cities` | **0.044** [0.034, 0.054] | **0.182** [0.162, 0.201] |
-| `sp_en_trans` → `neg_sp_en_trans` | **0.054** [0.031, 0.076] | **0.229** [0.186, 0.271] |
-| `larger_than` → `smaller_than` | **0.055** [0.045, 0.065] | **0.207** [0.189, 0.225] |
+At 1.5B, four layers tie for best validation accuracy on `cities`. Their behaviour on flipped data is very
+different (means over 5 random splits):
 
-On a balanced dataset, chance is 0.50. These probes are *confidently wrong*: they predict the opposite label most
-of the time.
-
-*Leading explanation.* The negated datasets reuse the same pairs ("Krasnodar / Russia") with "not" added and the
-label flipped. A probe that reads "is this city–country pair correct?" and ignores the negation will predict the
-pre-negation label, and so score near zero. The same mechanism explains `larger_than → smaller_than`: same
-numbers, flipped relation. This replicates the negation failure reported by Marks & Tegmark.
-
-*Scale.* The inversion is clearly weaker at 1.5B (the intervals don't overlap), so the larger model's probe is
-partly sensitive to "not" — but it is still far below chance.
-
-Probes trained on negated data transfer to *other* negated data, and more strongly at 1.5B:
-`neg_sp_en_trans → neg_cities` goes from 0.731 [0.710, 0.753] to 0.989 [0.983, 0.994], and
-`neg_cities → neg_sp_en_trans` from 0.788 [0.749, 0.833] to 0.836 [0.797, 0.873].
-
-### 4. Which layer you read from matters for generalization
+| 1.5B layer | Validation acc. | `cities` → `neg_cities` | `sp_en_trans` → `neg_sp_en_trans` | `larger_than` → `smaller_than` | Same prediction on twin (`cities`) |
+|---|---|---|---|---|---|
+| 11 | 0.997 | 0.05 | 0.01 | 0.00 | 0.96 |
+| 12 | 0.997 | 0.12 | 0.11 | 0.01 | 0.88 |
+| 15 | 0.997 | 0.20 | 0.21 | 0.20 | 0.80 |
+| 19 | 0.997 | 0.53 | 0.49 | 0.21 | 0.48 |
 
 ![In-distribution vs. transfer accuracy by layer, 1.5B](results/layer_transfer.png)
 
-At 1.5B, in-distribution accuracy is essentially flat (≈0.98–1.00) from layer 11 onward — from layer 7 for
-`larger_than` — so choosing a layer by in-distribution accuracy is close to arbitrary in that range. Transfer to
-the flipped dataset is anything but flat:
+The full curve shows the same thing. In-distribution accuracy is at least 0.98 from layer 11 onward (0.998 from
+layer 7 for `larger_than`), while transfer to the flipped dataset swings widely:
 
-- `sp_en_trans → neg_sp_en_trans` is almost perfectly inverted (≈0.00–0.10) at layers 8–14, then rises to
-  chance (≈0.50) from layer 18 on.
-- `cities → neg_cities` is most inverted at layer 11 (≈0.05), climbs to *above* chance around layers 18–21
-  (≈0.65 at layer 20), and settles back to ≈0.40–0.45 in the last layers.
-- `larger_than → smaller_than` is inverted (≈0.00–0.03) through layer 14, then climbs gradually but stays below
-  chance (≈0.46 at layer 28).
+- `sp_en_trans → neg_sp_en_trans` is ≈0.00–0.13 at layers 8–14 and ≈0.50 from layer 18 on.
+- `cities → neg_cities` is lowest at layer 11 (0.05), rises *above* chance around layers 18–21 (0.65 at layer 20,
+  range 0.55–0.77 over splits), and settles at ≈0.40–0.48 in the last layers.
+- `larger_than → smaller_than` is ≈0.00–0.04 through layer 14, then climbs slowly but stays below chance
+  (0.46 at layer 28).
 
-Layer 11 — the layer chosen by validation accuracy on `cities` — is where the inversion is strongest for both
-`cities` and `sp_en_trans`. The shaded band (5 random splits) is also wide in places, e.g. ≈0.55–0.77 for
-`cities → neg_cities` at layer 20, so a single-split, single-layer transfer number (like the tables above) is
-one point on a curve, not a property of "the" probe.
+This also bit me in practice: the original analysis code broke the four-way tie with an unstable sort, so the same
+code picked layer 15 on one machine and layer 11 on another, with very different cross-dataset numbers. The code
+now breaks ties deterministically, but the underlying point stands: **validating a probe on held-out examples from
+its own dataset does not pin down how it behaves under a simple distribution shift like negation.**
 
-For a safety tool, this is the practical lesson: validating a probe on held-out data from the training
-distribution says little about how it behaves under a simple distribution shift like negation.
+### 4. Affirmative datasets partly share a direction
 
-### 5. Other differences between the two models
+| Train → test (logistic regression) | 0.5B, layer 10 | 1.5B, layer 11 | 0.5B range* | 1.5B range* |
+|---|---|---|---|---|
+| `cities` → `sp_en_trans` | 0.675 [0.627, 0.720] | 0.893 [0.862, 0.924] | 0.50–0.82 | 0.50–0.97 |
+| `companies` → `cities` | 0.808 [0.787, 0.828] | 0.971 [0.961, 0.979] | 0.66–0.94 | 0.83–0.99 |
+| `sp_en_trans` → `cities` | 0.793 [0.772, 0.815] | 0.968 [0.959, 0.977] | 0.50–0.87 | 0.56–0.98 |
+| `companies` → `sp_en_trans` | 0.520 [0.472, 0.571] | 0.734 [0.686, 0.777] | 0.50–0.73 | 0.51–0.86 |
 
-- **Number comparisons.** At 0.5B, `larger_than` and `smaller_than` transfer to nothing else (≈ 0.50, apart from
-  the odd case below). At
-  1.5B, `smaller_than` transfers broadly (→ `cities` 0.888 [0.872, 0.903], → `sp_en_trans` 0.86,
-  → `companies` 0.77) while `larger_than` mostly does not (→ `cities` 0.628 [0.603, 0.652], other non-comparison
-  datasets ≈ 0.50).
-- **A likely spurious transfer goes away.** `larger_than → neg_cities` is 0.662 [0.639, 0.686] at 0.5B — odd for a
-  probe that transfers nowhere else — and 0.491 [0.465, 0.519] at 1.5B.
-- **Mass-mean vs. logistic regression.** The two-averages probe reproduces the same qualitative structure, which
-  argues the patterns are not an artifact of fitting. At 0.5B it is clearly weaker in-distribution (`companies`
-  0.62 vs 0.81, `larger_than` 0.76 vs 0.97). At 1.5B it is within about 0.1 of logistic regression in-distribution (furthest
-  behind on `companies`, 0.80 vs 0.95) and generalizes better on some pairs (`neg_cities → neg_sp_en_trans` 0.99 vs 0.84,
-  `companies → sp_en_trans` 0.97 vs 0.64).
+![Generalization matrix, 1.5B](results/generalization_logreg.png)
+
+Transfer between affirmative datasets is real but partial and very layer- and split-dependent. Averaged over tied
+layers and splits it is higher at 1.5B for all four pairs (e.g. `cities → sp_en_trans` 0.67 vs 0.78), but the
+ranges overlap, so I treat that as suggestive rather than established.
+
+### 5. What does — and doesn't — change between the two models
+
+Differences that hold across all tied layers and splits:
+
+- **Training on both polarities helps at 1.5B, not at 0.5B.** A probe trained on `cities` *and* `neg_cities`
+  reaches 0.84 on `neg_sp_en_trans` at 1.5B (range 0.55–0.97), up from 0.36 for a probe trained on `cities` alone.
+  At 0.5B the same combined probe reaches only 0.54 (0.50–0.78), versus 0.35.
+- **Negated datasets transfer to each other better at 1.5B:** `neg_sp_en_trans → neg_cities` is 0.50–0.77 at 0.5B
+  and 0.73–0.99 at 1.5B. (The reverse direction overlaps: 0.50–0.79 vs 0.50–0.98.)
+- **In-distribution accuracy is higher at 1.5B** (e.g. `companies` 0.83 vs 0.91 on average).
+
+Differences that do **not** hold up, and which an earlier draft of this write-up claimed:
+
+- *"The inversion is weaker at 1.5B."* At 1.5B's earliest tied layer it is actually stronger; across tied layers
+  the two models overlap. There is no reliable size effect here.
+- *"Number comparisons are isolated at 0.5B."* `larger_than → cities` does stay at 0.50 at 0.5B, but
+  `smaller_than → cities` ranges from 0.50 to 0.83 and `larger_than → neg_cities` from 0.50 to 0.76, depending on
+  layer and split.
+
+**Mass-mean probe.** It reproduces the same qualitative picture, which suggests the patterns are not an artifact of
+fitting. It is clearly weaker in-distribution on `companies` (0.66 vs 0.83 at 0.5B, 0.72 vs 0.91 at 1.5B, averaged
+over tied layers and splits) and less inverted on `cities → neg_cities` (0.28 and 0.46 vs 0.18 and 0.23).
 
 ## Limitations
 
-- **Two small models from one family.** The scale comparison has two points; I can't say whether the inversion
-  keeps shrinking at 7B and beyond.
-- **Short, templated statements.** Surface features (shared vocabulary, sentence templates) may drive some
-  transfers; the 0.5B `larger_than → neg_cities` result is a warning.
-- **Single split in the main tables.** Section 4 shows split-to-split variation can be large for transfer numbers,
-  so the exact values in the tables are less reliable than their direction.
+- **Two small models from one family.** I can't say how any of this behaves at 7B and beyond.
+- **Short, templated statements.** Surface features such as shared templates may drive some transfers.
+- **Main tables use one split.** Across tied layers and splits, a cross-dataset number typically moves by about
+  0.25, and often by 0.4 or more; read the single-split values as examples, not constants.
 - **No causal check.** Probes show what is linearly decodable, not what the model uses. Activation patching or
   steering along the probe direction would be needed to claim that.
 
 ## Next steps
 
-- Train on affirmative **and** negated statements together (e.g. `cities` + `neg_cities`) and test on the
-  translation datasets — a direct test of the pair-association explanation.
-- Repeat the main tables over several splits and report means with intervals.
-- Choose the layer by transfer on a held-out *dataset*, not just held-out *examples*.
-- Run a 3B model to add a third point to the scale comparison.
+- Choose the probe layer by transfer to a held-out *dataset* rather than held-out *examples*, and test whether
+  that choice generalizes to new kinds of statements.
+- Understand why combined training works at 1.5B but not 0.5B: does the combined probe find a direction that is
+  genuinely sensitive to negation, or a second "negation" feature added on top?
+- Add a 3B model to see which of the Section 5 differences continue with scale.
 - Steer along the probe direction and check whether the model's stated answer changes.
 
 ## Reproduce
@@ -154,14 +169,16 @@ git clone https://github.com/saprmarks/geometry-of-truth.git
 pip install -r requirements.txt
 
 python extract.py --model Qwen/Qwen2.5-0.5B-Instruct
-python analyze.py --acts acts/Qwen__Qwen2.5-0.5B-Instruct --out results-0.5B
+python analyze.py    --acts acts/Qwen__Qwen2.5-0.5B-Instruct --out results-0.5B
+python robustness.py --acts acts/Qwen__Qwen2.5-0.5B-Instruct --sweep results-0.5B/layer_sweep.csv --out results-0.5B
 
 python extract.py --model Qwen/Qwen2.5-1.5B-Instruct
-python analyze.py --acts acts/Qwen__Qwen2.5-1.5B-Instruct --out results
+python analyze.py        --acts acts/Qwen__Qwen2.5-1.5B-Instruct --out results
 python layer_transfer.py --acts acts/Qwen__Qwen2.5-1.5B-Instruct --out results
+python robustness.py     --acts acts/Qwen__Qwen2.5-1.5B-Instruct --sweep results/layer_sweep.csv --out results
 ```
 
-0.5B figures are in `results-0.5B/`, 1.5B figures in `results/`.
+0.5B outputs are in `results-0.5B/`, 1.5B outputs in `results/`.
 
 ## References
 
