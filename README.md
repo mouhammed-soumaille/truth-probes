@@ -187,6 +187,10 @@ over tied layers and splits) and less inverted on `cities → neg_cities` (0.28 
 - Add a 3B model to see which of the Section 5 differences continue with scale.
 - Steer along the probe direction and check whether the model's stated answer changes.
 
+## AI usage
+
+I used Claude throughout this project. It wrote most of the code, helped edit this README, and did an independent verification pass that re-derived the numbers with a second implementation and caught the layer tie-break bug described in Section 3. I ran all the experiments on my own machine, interpreted the results, wrote the first draft of the write-up, and reviewed the final claims. I'm happy to walk through any part of it.
+
 ## Reproduce
 
 ```bash
